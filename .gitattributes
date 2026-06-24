@@ -1,0 +1,6 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Treat OMNIC spectra as binary (never line-ending-normalize)
+*.SPA binary
+*.spa binary

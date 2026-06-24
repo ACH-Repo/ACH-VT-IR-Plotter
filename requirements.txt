@@ -1,0 +1,7 @@
+# Core dependencies
+numpy
+matplotlib
+
+# Optional: only needed for the --smiles structure overlay
+# rdkit
+# pillow
