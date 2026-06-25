@@ -152,8 +152,10 @@ def read_csv(path: Path) -> Tuple[np.ndarray, np.ndarray, Optional[str]]:
 
     # Pick a delimiter. ';' and tab are unambiguous; a lone ',' is only a
     # delimiter when the decimals are dots (otherwise it is the decimal mark).
+    # Sniff from the first line that actually holds numbers, so a header row
+    # doesn't throw off the guess.
     delim: Optional[str] = None
-    probe = lines[0]
+    probe = next((ln for ln in lines if any(c.isdigit() for c in ln)), lines[0])
     if ";" in probe:
         delim = ";"
     elif "\t" in probe:
@@ -541,10 +543,23 @@ def print_report(spectra: List[Spectrum]) -> None:
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
+class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter,
+                     argparse.RawDescriptionHelpFormatter):
+    """Show argument defaults *and* keep the epilog's hand-formatting."""
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Plot a folder of variable-temperature IR spectra.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=_HelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  plot_vt_ir.py data/                  waterfall of ./data\n"
+            "  plot_vt_ir.py data/ --mode updown    heating vs cooling panels\n"
+            "  plot_vt_ir.py data/ --mode overlay --unit T\n"
+            "  plot_vt_ir.py data/ --input-units A  force every input to absorbance\n"
+            "  plot_vt_ir.py data/ --list           report classification + units\n"
+        ),
     )
     p.add_argument("directory", nargs="?", default=".",
                    help="Folder of VT-IR spectra (.csv / .spa / .jdx).")

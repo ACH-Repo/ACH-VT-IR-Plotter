@@ -142,6 +142,7 @@ Python 3.9+. `numpy` and `matplotlib` are the only requirements. The optional
 ```
 ACH-VT-IR-Plotter/
 ├─ plot_vt_ir.py        the plotter (single file, CLI)
+├─ README.md            this file
 ├─ requirements.txt     numpy, matplotlib
 ├─ examples/            a real heating+cooling run (sample anonymised → "DEMO")
 │  ├─ NN_DEMO_<T>C_up.csv / _down.csv
