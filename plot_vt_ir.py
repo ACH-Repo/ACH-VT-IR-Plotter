@@ -32,8 +32,13 @@ matters because a bare CSV does not record which one it is:
                             baseline at the bottom (peaks up) -> Absorbance;
                             baseline at the top (dips down)   -> Transmittance.
 
-The desired *display* unit is set with ``--unit {A,T}``; absorbance and
-transmittance are interconverted as needed.
+The desired *display* unit is set with ``--unit {A,T}`` (default T); absorbance
+and transmittance are interconverted as needed.
+
+In stack / updown modes the left edge labels each curve with its temperature and
+the right axis shows its elapsed time -- read from the SPA collection timestamp,
+or from ``--scan-interval`` (asked for at the prompt) when the files carry none
+(e.g. CSV). The temperature colour bar is off by default (``--colorbar`` adds it).
 
 Usage examples:
 
@@ -53,6 +58,7 @@ import re
 import struct
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -83,6 +89,10 @@ NAME_RE = re.compile(
 )
 
 SUPPORTED_EXTS = (".csv", ".spa", ".jdx", ".dx", ".jcm", ".txt")
+
+# OMNIC stores the collection time at byte 296 as a uint32 = seconds since this
+# epoch (UTC). Used to build the optional time axis.
+SPA_EPOCH = datetime(1899, 12, 31)
 
 # OMNIC SPA y data-type code -> internal unit token (per spectrochempy).
 OMNIC_YCODE: Dict[int, str] = {
@@ -130,6 +140,8 @@ class Spectrum:
     index: Optional[int]      # chronological NN_ prefix, if present
     unit: str = "A"           # internal unit token; see UNIT_LABEL
     unit_source: str = ""     # how the unit was decided (for the report)
+    timestamp: Optional[datetime] = None  # collection time (SPA header), if any
+    elapsed_min: Optional[float] = None   # minutes from run start (for time axis)
 
     @property
     def order_key(self) -> Tuple[int, float]:
@@ -139,9 +151,19 @@ class Spectrum:
 
 
 # --------------------------------------------------------------------------- #
-# Readers -- each returns (x, y, native_unit_or_None)
+# Readers -- each returns (x, y, native_unit_or_None, timestamp_or_None)
 # --------------------------------------------------------------------------- #
-def read_csv(path: Path) -> Tuple[np.ndarray, np.ndarray, Optional[str]]:
+def read_spa_timestamp(raw: bytes) -> Optional[datetime]:
+    """Collection time from an OMNIC SPA header: uint32 seconds since 1899-12-31
+    (UTC) at byte 296. Returns None if the value isn't a plausible date."""
+    try:
+        ts = SPA_EPOCH + timedelta(seconds=struct.unpack_from("<I", raw, 296)[0])
+    except Exception:  # noqa: BLE001
+        return None
+    return ts if 2000 <= ts.year <= 2100 else None
+
+
+def read_csv(path: Path) -> Tuple[np.ndarray, np.ndarray, Optional[str], Optional[datetime]]:
     """Two-column (wavenumber, intensity) text. Auto-detects the ``;`` / ``,`` /
     whitespace delimiter and European (comma) decimals, and skips any
     non-numeric header lines. A bare CSV carries no unit information."""
@@ -178,10 +200,10 @@ def read_csv(path: Path) -> Tuple[np.ndarray, np.ndarray, Optional[str]]:
         raise ValueError("no numeric rows found")
 
     arr = np.array([[c.replace(",", ".") for c in r] for r in rows], dtype=float)
-    return arr[:, 0], arr[:, 1], None
+    return arr[:, 0], arr[:, 1], None, None
 
 
-def read_spa(path: Path) -> Tuple[np.ndarray, np.ndarray, Optional[str]]:
+def read_spa(path: Path) -> Tuple[np.ndarray, np.ndarray, Optional[str], Optional[datetime]]:
     """Thermo OMNIC ``.SPA`` binary. Walks the section table to find the
     spectral-header block (key 2: point count + first/last wavenumber + y
     data-type code) and the intensity block (key 3: float32 values).
@@ -218,10 +240,10 @@ def read_spa(path: Path) -> Tuple[np.ndarray, np.ndarray, Optional[str]]:
     y = np.frombuffer(raw, dtype="<f4", count=data_size // 4, offset=data_off).astype(float)
     x = np.linspace(first_x, last_x, len(y))
     unit = OMNIC_YCODE.get(ycode) if ycode is not None else None
-    return x, y, unit
+    return x, y, unit, read_spa_timestamp(raw)
 
 
-def read_jcampdx(path: Path) -> Tuple[np.ndarray, np.ndarray, Optional[str]]:
+def read_jcampdx(path: Path) -> Tuple[np.ndarray, np.ndarray, Optional[str], Optional[datetime]]:
     """JCAMP-DX reader (handles the common ``(X++(Y..Y))`` tabular form).
     Reads the explicit x grid from FIRST/LAST/DELTAX/NPOINTS and the y values
     from the data table, applying the X/Y scaling factors."""
@@ -263,10 +285,10 @@ def read_jcampdx(path: Path) -> Tuple[np.ndarray, np.ndarray, Optional[str]]:
         unit = "A"
     elif "trans" in yunits:
         unit = "T"
-    return x, y, unit
+    return x, y, unit, None
 
 
-def read_xy(path: Path) -> Tuple[np.ndarray, np.ndarray, Optional[str]]:
+def read_xy(path: Path) -> Tuple[np.ndarray, np.ndarray, Optional[str], Optional[datetime]]:
     ext = path.suffix.lower()
     if ext == ".spa":
         return read_spa(path)
@@ -345,7 +367,7 @@ def load_directory(folder: Path, select: str,
     for i, p in enumerate(chosen):
         meta = classify(p)
         try:
-            x, y, native_unit = read_xy(p)
+            x, y, native_unit, ts = read_xy(p)
         except Exception as e:  # noqa: BLE001 -- one bad file shouldn't abort
             print(f"[warn] skipping {p.name}: {e}", file=sys.stderr)
             continue
@@ -355,7 +377,8 @@ def load_directory(folder: Path, select: str,
         if overrides is not None:
             override = (overrides[0] if len(overrides) == 1 else overrides[i]).upper()
         unit, source = resolve_unit(meta, native_unit, y, override)
-        out.append(Spectrum(path=p, x=x, y=y, unit=unit, unit_source=source, **meta))
+        out.append(Spectrum(path=p, x=x, y=y, unit=unit, unit_source=source,
+                            timestamp=ts, **meta))
     return out
 
 
@@ -391,10 +414,10 @@ def normalize(spectra: Sequence[Spectrum], mode: str) -> None:
 
 
 def auto_offset(spectra: Sequence[Spectrum]) -> float:
-    """A fixed offset just under one typical spectrum's amplitude, so adjacent
-    traces separate with a little overlap."""
+    """A fixed offset a bit under one typical spectrum's amplitude, so adjacent
+    traces sit close with a little overlap."""
     amps = [float(np.percentile(s.y, 99) - np.percentile(s.y, 1)) for s in spectra]
-    return 0.9 * (float(np.median(amps)) if amps else 1.0)
+    return 0.55 * (float(np.median(amps)) if amps else 1.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -459,22 +482,79 @@ def add_mol_image(ax, smiles: str, loc=(0.04, 0.96), zoom: float = 0.32) -> None
     ax.add_artist(box)
 
 
+def format_elapsed(minutes: float) -> str:
+    """Elapsed minutes -> 'h:mm'."""
+    m = int(round(minutes))
+    return f"{m // 60}:{m % 60:02d}"
+
+
+def resolve_times(spectra: List[Spectrum], args) -> bool:
+    """Populate ``s.elapsed_min`` (minutes from the first scan) for the time
+    axis and report whether one should be drawn. Prefers SPA header timestamps;
+    otherwise falls back to a uniform ``--scan-interval`` (asked for at the
+    prompt when running interactively)."""
+    if args.no_time_axis or args.mode == "overlay":
+        return False
+    order = sorted(spectra, key=lambda s: s.order_key)
+    if order and all(s.timestamp is not None for s in order):
+        t0 = min(s.timestamp for s in order)
+        for s in order:
+            s.elapsed_min = (s.timestamp - t0).total_seconds() / 60.0
+        return True
+    interval = args.scan_interval
+    if interval is None and sys.stdin.isatty():
+        sys.stderr.write("No timestamps in these files. Minutes between scans "
+                         "for the time axis (blank = skip): ")
+        sys.stderr.flush()
+        try:
+            resp = input().strip().replace(",", ".")
+        except (EOFError, KeyboardInterrupt):
+            resp = ""  # non-interactive despite isatty(), or user bailed -> skip
+        if resp:
+            try:
+                interval = float(resp)
+            except ValueError:
+                print("[warn] not a number; skipping the time axis.", file=sys.stderr)
+    if interval:
+        for i, s in enumerate(order):
+            s.elapsed_min = i * interval
+        return True
+    return False
+
+
 def draw_panel(ax, spectra: List[Spectrum], cmap, norm, offset: float,
                label_curves: bool, unit: str, xlim: Tuple[float, float],
-               tick_step: Optional[float], hide_yticks: bool) -> None:
+               tick_step: Optional[float], hide_yticks: bool,
+               linewidth: float, show_time: bool) -> None:
     spectra = sorted(spectra, key=lambda s: s.order_key)
     hi = max(xlim)
+    span = max(xlim) - min(xlim)
+    time_ticks: List[float] = []
+    time_labels: List[str] = []
     for i, s in enumerate(spectra):
         off = i * offset
         color = cmap(norm(s.temperature))
-        ax.plot(s.x, s.y + off, color=color, lw=0.8)
+        ax.plot(s.x, s.y + off, color=color, lw=linewidth)
+        tail = s.x >= hi - 0.06 * span                  # flat high-wavenumber end
+        base = float(np.mean(s.y[tail])) if tail.any() else float(s.y[-1])
+        ypos = off + base
         if label_curves and offset:
-            tail = s.x >= hi - 0.06 * (max(xlim) - min(xlim))  # flat high-nu end
-            base = float(np.mean(s.y[tail])) if tail.any() else float(s.y[-1])
-            ax.text(hi, off + base, f" {s.temperature:g} °C", color=color,
+            ax.text(hi, ypos, f" {s.temperature:g} °C", color=color,
                     fontsize=7, ha="left", va="bottom")
+        if show_time and s.elapsed_min is not None:
+            time_ticks.append(ypos)
+            time_labels.append(format_elapsed(s.elapsed_min))
     style_axis(ax, unit, xlim, hide_yticks=hide_yticks, tick_step=tick_step)
     ax.margins(y=0.04)
+    ax.autoscale_view()
+
+    if show_time and time_ticks:
+        axr = ax.twinx()                                # right-hand time axis
+        axr.set_ylim(ax.get_ylim())
+        axr.set_yticks(time_ticks)
+        axr.set_yticklabels(time_labels, fontsize=7)
+        axr.tick_params(axis="y", which="both", direction="in", length=3)
+        axr.set_ylabel(r"elapsed time  /  h:mm", size=10)
 
 
 def build_figure(spectra: List[Spectrum], args) -> "plt.Figure":
@@ -482,6 +562,7 @@ def build_figure(spectra: List[Spectrum], args) -> "plt.Figure":
     for s in spectra:  # convert to the requested display unit where possible
         s.y, s.unit = convert_unit(s.y, s.unit, unit)
     normalize(spectra, args.norm)
+    show_time = resolve_times(spectra, args)
 
     xlim = tuple(args.xlim) if args.xlim else (
         max(float(s.x.max()) for s in spectra),
@@ -502,7 +583,8 @@ def build_figure(spectra: List[Spectrum], args) -> "plt.Figure":
         offset = args.offset if args.offset is not None else auto_offset(spectra)
         for ax, (key, grp) in zip(axes, groups.items()):
             draw_panel(ax, grp, cmap, norm, offset, label_curves=True, unit=unit,
-                       xlim=xlim, tick_step=args.tick_step, hide_yticks=True)
+                       xlim=xlim, tick_step=args.tick_step, hide_yticks=True,
+                       linewidth=args.linewidth, show_time=show_time)
             ax.set_title(DIRECTION_LABEL.get(key, key), fontsize=10, loc="left")
     else:
         sel = spectra
@@ -516,11 +598,13 @@ def build_figure(spectra: List[Spectrum], args) -> "plt.Figure":
         else:  # stack
             offset = args.offset if args.offset is not None else auto_offset(sel)
         draw_panel(ax, sel, cmap, norm, offset, label_curves=(args.mode == "stack"),
-                   unit=unit, xlim=xlim, tick_step=args.tick_step, hide_yticks=hide_y)
+                   unit=unit, xlim=xlim, tick_step=args.tick_step, hide_yticks=hide_y,
+                   linewidth=args.linewidth, show_time=show_time)
 
-    sm = ScalarMappable(norm=norm, cmap=cmap)
-    cbar = fig.colorbar(sm, ax=list(axes), pad=0.015, fraction=0.045)
-    cbar.set_label(r"Temperature  /  $^\circ$C", size=10)
+    if args.colorbar:
+        sm = ScalarMappable(norm=norm, cmap=cmap)
+        cbar = fig.colorbar(sm, ax=list(axes), pad=0.015, fraction=0.045)
+        cbar.set_label(r"Temperature  /  $^\circ$C", size=10)
 
     if args.smiles:
         add_mol_image(axes[0], args.smiles)
@@ -566,7 +650,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--mode", choices=("overlay", "stack", "updown"), default="stack",
                    help="overlay (no offset), stack (fixed offset), or "
                         "updown (heating/cooling panels).")
-    p.add_argument("--unit", choices=("A", "T"), default="A",
+    p.add_argument("--unit", choices=("A", "T"), default="T",
                    help="Display unit: A=absorbance, T=transmittance.")
     p.add_argument("--input-units", default=None,
                    help="Override detected input unit(s): a single token "
@@ -578,6 +662,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="Scan direction filter (overlay/stack modes only).")
     p.add_argument("--offset", type=float, default=None,
                    help="Fixed vertical offset for stack/updown (default: auto).")
+    p.add_argument("--linewidth", "--lw", type=float, default=0.7,
+                   help="Spectrum line width.")
+    p.add_argument("--colorbar", action="store_true",
+                   help="Add the temperature colour bar (off by default).")
+    p.add_argument("--no-time-axis", action="store_true",
+                   help="Do not draw the right-hand elapsed-time axis.")
+    p.add_argument("--scan-interval", type=float, default=None,
+                   metavar="MIN", help="Minutes between scans, used for the time "
+                        "axis when the files carry no timestamp (e.g. CSV). If "
+                        "omitted and needed, you'll be prompted.")
     p.add_argument("--norm", choices=("none", "individual", "global"), default="none",
                    help="Normalize intensities before plotting.")
     p.add_argument("--cmap", default="gnuplot2", help="Matplotlib colormap (by T).")

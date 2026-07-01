@@ -23,8 +23,10 @@ temperature and scan direction are read straight from the filenames.
   <img src="docs/updown.png" width="49%" alt="up/down mode">
 </p>
 
-Spectra are coloured by temperature (a shared colour bar), so the same
-temperature is the same colour across both `updown` panels.
+Every curve is coloured by temperature, so the same temperature is the same
+colour across both `updown` panels. In `stack`/`updown` the **left edge labels
+each curve with its temperature** and the **right axis with its elapsed time**
+(see below); add `--colorbar` if you also want a temperature scale bar.
 
 ## Quick start
 
@@ -38,10 +40,11 @@ name anonymised) as a waterfall. A few more:
 
 ```
 python plot_vt_ir.py examples --mode updown          # heating vs cooling
-python plot_vt_ir.py examples --mode overlay --unit T # overlaid, as %transmittance
-python plot_vt_ir.py examples/omnic-spa --select bg   # read .SPA files directly
-python plot_vt_ir.py examples --list                  # just report what it found
-python plot_vt_ir.py examples --silent --ext png      # save examples.png, no window
+python plot_vt_ir.py examples --unit A               # absorbance (default is %T)
+python plot_vt_ir.py examples --scan-interval 8      # time axis: 8 min between scans
+python plot_vt_ir.py examples/omnic-spa --select bg  # read .SPA directly
+python plot_vt_ir.py examples --list                 # just report what it found
+python plot_vt_ir.py examples --silent --ext png     # save examples.png, no window
 ```
 
 Run with no folder argument to plot the current directory.
@@ -80,8 +83,21 @@ the plotter resolves it **hierarchically** — first source that knows, wins:
    **bottom** of the range with peaks pointing up → Absorbance; baseline at the
    **top** with dips pointing down → Transmittance.
 
-The *display* unit is independent: `--unit A` (default) or `--unit T`, with
+The *display* unit is independent: `--unit T` (default) or `--unit A`, with
 absorbance ↔ transmittance converted as needed.
+
+## The time axis
+
+In `stack` / `updown` mode the right-hand axis shows **when each spectrum was
+collected** (elapsed `h:mm` from the first scan). The time comes from:
+
+1. the **`.SPA` collection timestamp** (stored in the header) — automatic; or
+2. **`--scan-interval MIN`** — assume a uniform gap between scans, for files with
+   no timestamp (e.g. CSV). If it's needed and you didn't pass it, you're
+   prompted for it (blank = skip the time axis).
+
+Disable it entirely with `--no-time-axis`. (The example above cools overnight, so
+the final 40 °C scan honestly reads ~18 h — the axis reflects the real gaps.)
 
 ## Command reference
 
@@ -89,11 +105,15 @@ absorbance ↔ transmittance converted as needed.
 | --- | --- | --- |
 | `directory` | `.` | folder of spectra to plot |
 | `--mode {overlay,stack,updown}` | `stack` | display mode (see above) |
-| `--unit {A,T}` | `A` | display as Absorbance or %Transmittance |
+| `--unit {A,T}` | `T` | display as %Transmittance or Absorbance |
 | `--input-units` | auto | override the input unit (one token, or one per file) |
 | `--select {sample,bg,all}` | `sample` | which spectra to plot |
 | `--direction {both,up,down}` | `both` | scan-direction filter (overlay/stack) |
 | `--offset` | auto | fixed vertical offset for stack/updown |
+| `--linewidth` / `--lw` | `0.7` | spectrum line width |
+| `--colorbar` | off | add a temperature colour bar |
+| `--scan-interval MIN` | – | minutes between scans, for the time axis when files lack timestamps |
+| `--no-time-axis` | – | drop the right-hand elapsed-time axis |
 | `--norm {none,individual,global}` | `none` | normalise intensities |
 | `--cmap` | `gnuplot2` | matplotlib colormap (mapped to temperature) |
 | `--xlim HIGH LOW` | from data | wavenumber limits, e.g. `4000 400` |
@@ -163,7 +183,10 @@ count, first/last wavenumber, and the y data-type code at byte +12) and key `3`
 (the `float32` intensity array). The wavenumber axis is reconstructed as a linear
 ramp from first to last. The y data-type code is mapped to a unit the same way
 [spectrochempy](https://www.spectrochempy.fr/) does it (17 = absorbance,
-16 = %transmittance, 15 = single beam, 20 = Kubelka–Munk, …).
+16 = %transmittance, 15 = single beam, 20 = Kubelka–Munk, …). The **collection
+time** sits at byte 296 as a `uint32` of seconds since 1899-12-31 (UTC); it feeds
+the elapsed-time axis (differences are timezone-independent, so no conversion is
+needed).
 
 **The CSV unit heuristic** is deliberately scale-free, so it works whether
 transmittance is stored as a fraction (~1.0 baseline) or a percentage (~100
@@ -202,8 +225,9 @@ tool here. The user-visible changes:
   units → background convention → CSV heuristic → manual override);
 - recognition of the file-naming convention (temperature, scan direction,
   background vs sample);
-- temperature colour bar, per-curve labels, and assorted bug fixes in the
-  normalisation helpers.
+- per-curve temperature labels, an **elapsed-time axis** read from the SPA
+  collection timestamps (or a manual scan interval), an optional temperature
+  colour bar, and assorted bug fixes in the normalisation helpers.
 
 The plotting *style* (inverted wavenumber axis, mirrored top ticks, truncated
 `gnuplot2` temperature colouring, the optional SMILES structure overlay) is
